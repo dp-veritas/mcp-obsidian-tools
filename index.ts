@@ -164,6 +164,7 @@ const ObsidianQueryArgsSchema = z.object({
 const ObsidianCountFilesArgsSchema = z.object({
   folder: z.string().optional().describe("Optional subfolder path relative to vault root. If omitted, counts entire vault."),
   includeSubfolders: z.boolean().optional().describe("Whether to count files in subfolders. Defaults to true."),
+  includeNames: z.boolean().optional().describe("Whether to include file names in the response. Defaults to false. When true, returns a list of file names along with the count."),
 })
 
 const ToolInputSchema = ToolSchema.shape.inputSchema
@@ -609,7 +610,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         description:
           "Count the total number of markdown files (.md) in the Obsidian vault " +
           "or a specific subfolder. Returns the total count and a breakdown by " +
-          "immediate subfolders. Useful for understanding vault size and organization.",
+          "immediate subfolders. Set includeNames=true to also get a list of file names. " +
+          "Useful for understanding vault size, organization, and listing files in a folder.",
         inputSchema: zodToJsonSchema(
           ObsidianCountFilesArgsSchema
         ) as ToolInput,
@@ -1091,9 +1093,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
 
         const targetFolder = parsed.data.folder || ""
         const includeSubfolders = parsed.data.includeSubfolders !== false
+        const includeNames = parsed.data.includeNames === true
 
         let totalCount = 0
         const folderCounts: Record<string, number> = {}
+        const fileNames: string[] = []
+        const MAX_FILE_NAMES = 100
 
         for (const base of vaultDirectories) {
           const startPath = targetFolder 
@@ -1148,6 +1153,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
               } else if (entry.isFile() && entry.name.endsWith(".md")) {
                 totalCount++
                 
+                // Collect file names if requested (up to limit)
+                if (includeNames && fileNames.length < MAX_FILE_NAMES) {
+                  const relativePath = fullPath.replace(startPath, "").replace(/^[/\\]/, "")
+                  fileNames.push(relativePath)
+                }
+                
                 // Track counts by immediate subfolder (depth 1)
                 if (depth === 0) {
                   folderCounts["(root)"] = (folderCounts["(root)"] || 0) + 1
@@ -1177,6 +1188,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
             .sort((a, b) => b[1] - a[1])
           for (const [folder, count] of sorted) {
             lines.push(`  ${folder}: ${count}`)
+          }
+        }
+
+        // Include file names if requested
+        if (includeNames && fileNames.length > 0) {
+          lines.push("")
+          lines.push("Files:")
+          // Sort alphabetically
+          fileNames.sort((a, b) => a.localeCompare(b))
+          for (const fileName of fileNames) {
+            lines.push(`  ${fileName}`)
+          }
+          if (totalCount > MAX_FILE_NAMES) {
+            lines.push(`  ... and ${totalCount - MAX_FILE_NAMES} more files`)
           }
         }
 
