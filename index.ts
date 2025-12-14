@@ -161,6 +161,11 @@ const ObsidianQueryArgsSchema = z.object({
   maxResults: z.number().int().positive().optional(),
 })
 
+const ObsidianCountFilesArgsSchema = z.object({
+  folder: z.string().optional().describe("Optional subfolder path relative to vault root. If omitted, counts entire vault."),
+  includeSubfolders: z.boolean().optional().describe("Whether to count files in subfolders. Defaults to true."),
+})
+
 const ToolInputSchema = ToolSchema.shape.inputSchema
 type ToolInput = z.infer<typeof ToolInputSchema>
 
@@ -597,6 +602,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           "narrow results.",
         inputSchema: zodToJsonSchema(
           ObsidianQueryArgsSchema
+        ) as ToolInput,
+      },
+      {
+        name: "obsidian_count_files",
+        description:
+          "Count the total number of markdown files (.md) in the Obsidian vault " +
+          "or a specific subfolder. Returns the total count and a breakdown by " +
+          "immediate subfolders. Useful for understanding vault size and organization.",
+        inputSchema: zodToJsonSchema(
+          ObsidianCountFilesArgsSchema
         ) as ToolInput,
       },
     ],
@@ -1055,6 +1070,114 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                 : "") +
               `\n${r.snippet}`
           )
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: lines.join("\n"),
+            },
+          ],
+        }
+      }
+      case "obsidian_count_files": {
+        const parsed = ObsidianCountFilesArgsSchema.safeParse(args)
+        if (!parsed.success) {
+          throw new Error(
+            `Invalid arguments for obsidian_count_files: ${parsed.error}`
+          )
+        }
+
+        const targetFolder = parsed.data.folder || ""
+        const includeSubfolders = parsed.data.includeSubfolders !== false
+
+        let totalCount = 0
+        const folderCounts: Record<string, number> = {}
+
+        for (const base of vaultDirectories) {
+          const startPath = targetFolder 
+            ? path.join(base, targetFolder) 
+            : base
+
+          // Verify the path exists and is accessible
+          try {
+            const stats = await fs.stat(startPath)
+            if (!stats.isDirectory()) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `Error: "${targetFolder}" is not a directory.`,
+                  },
+                ],
+                isError: true,
+              }
+            }
+          } catch {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: Folder "${targetFolder}" not found in vault.`,
+                },
+              ],
+              isError: true,
+            }
+          }
+
+          const stack: { path: string; depth: number }[] = [{ path: startPath, depth: 0 }]
+          
+          while (stack.length > 0) {
+            const { path: current, depth } = stack.pop()!
+            const entries = await fs.readdir(current, { withFileTypes: true })
+            
+            for (const entry of entries) {
+              const fullPath = path.join(current, entry.name)
+              
+              try {
+                await validatePath(fullPath)
+              } catch {
+                continue
+              }
+
+              if (entry.isDirectory()) {
+                if (includeSubfolders || depth === 0) {
+                  stack.push({ path: fullPath, depth: depth + 1 })
+                }
+              } else if (entry.isFile() && entry.name.endsWith(".md")) {
+                totalCount++
+                
+                // Track counts by immediate subfolder (depth 1)
+                if (depth === 0) {
+                  folderCounts["(root)"] = (folderCounts["(root)"] || 0) + 1
+                } else {
+                  // Find immediate subfolder name
+                  const relativePath = fullPath.replace(startPath, "")
+                  const parts = relativePath.split(path.sep).filter(p => p.length > 0)
+                  if (parts.length >= 1) {
+                    const immediateFolder = parts[0]
+                    folderCounts[immediateFolder] = (folderCounts[immediateFolder] || 0) + 1
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Build response
+        const lines: string[] = []
+        const folderLabel = targetFolder || "vault"
+        lines.push(`Total files in ${folderLabel}: ${totalCount}`)
+        
+        if (Object.keys(folderCounts).length > 1 || (Object.keys(folderCounts).length === 1 && !folderCounts["(root)"])) {
+          lines.push("")
+          lines.push("Breakdown by folder:")
+          const sorted = Object.entries(folderCounts)
+            .sort((a, b) => b[1] - a[1])
+          for (const [folder, count] of sorted) {
+            lines.push(`  ${folder}: ${count}`)
+          }
         }
 
         return {
