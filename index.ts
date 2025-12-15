@@ -1048,13 +1048,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
           score?: number
         }[] = []
 
+        // Collect all matches first, then sort by score and limit
+        // (Don't limit during collection - that causes high-scoring deep files to be missed)
+        const internalLimit = 1000 // Scan up to 1000 matches before sorting
         for (const base of vaultDirectories) {
           const stack: string[] = [base]
-          while (stack.length > 0 && results.length < limit) {
+          while (stack.length > 0 && results.length < internalLimit) {
             const current = stack.pop() as string
             const entries = await fs.readdir(current, { withFileTypes: true })
             for (const entry of entries) {
-              if (results.length >= limit) break
+              if (results.length >= internalLimit) break
               const fullPath = path.join(current, entry.name)
               try {
                 await validatePath(fullPath)
@@ -1077,8 +1080,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                   "\n" +
                   tags.join(" ").toLowerCase()
 
-                // Calculate how many tokens match (scored matching)
-                const matchCount = tokens.filter((t) => haystack.includes(t)).length
+                // Calculate how many tokens match (scored matching with word boundaries)
+                // Use word boundary regex to avoid "day" matching "today", "yesterday", etc.
+                const matchCount = tokens.filter((t) => {
+                  const regex = new RegExp(`\\b${t}\\b`, 'i')
+                  return regex.test(haystack)
+                }).length
                 const matchRatio = tokens.length > 0 ? matchCount / tokens.length : 1
 
                 // Require at least half the tokens to match (or all if only 1-2 tokens)
@@ -1125,6 +1132,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
 
         // Sort results by score (highest first) for better relevance
         results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+        
+        // Now apply the user's requested limit after sorting
+        const topResults = results.slice(0, limit)
 
         const lines: string[] = []
         if (range) {
@@ -1132,8 +1142,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
             `Date range: ${range.start.toISOString()} → ${range.end.toISOString()}`
           )
         }
-        lines.push(`Matches: ${results.length}`)
-        for (const r of results) {
+        lines.push(`Matches: ${topResults.length}${results.length > limit ? ` (showing top ${limit} of ${results.length} by relevance)` : ""}`)
+        for (const r of topResults) {
           lines.push(
             `\n${r.path}` +
               (r.created ? ` (created: ${r.created})` : "") +
