@@ -909,7 +909,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                 const raw = await fs.readFile(validPath, "utf-8")
                 const links = extractLinks(raw)
                 const hasBacklink = links.some((link) => {
-                  const norm = link.replace(/\\/g, "/")
+                  // Decode URL-encoded paths (e.g., %20 -> space) for proper matching
+                  let decoded: string
+                  try {
+                    decoded = decodeURIComponent(link)
+                  } catch {
+                    decoded = link // fallback if invalid encoding
+                  }
+                  const norm = decoded.replace(/\\/g, "/")
                   const baseName = path.basename(norm).replace(/\.md$/i, "")
                   return (
                     norm === normalizedTarget ||
@@ -1038,6 +1045,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
           snippet: string
           created?: string
           tags?: string[]
+          score?: number
         }[] = []
 
         for (const base of vaultDirectories) {
@@ -1069,11 +1077,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                   "\n" +
                   tags.join(" ").toLowerCase()
 
-                const allTokensMatch =
-                  tokens.length === 0 ||
-                  tokens.every((t) => haystack.includes(t))
+                // Calculate how many tokens match (scored matching)
+                const matchCount = tokens.filter((t) => haystack.includes(t)).length
+                const matchRatio = tokens.length > 0 ? matchCount / tokens.length : 1
 
-                if (allTokensMatch) {
+                // Require at least half the tokens to match (or all if only 1-2 tokens)
+                const minMatchRatio = tokens.length <= 2 ? 1 : 0.5
+                const hasEnoughMatches = matchRatio >= minMatchRatio
+
+                if (hasEnoughMatches) {
                   let idx = -1
                   if (tokens.length > 0) {
                     for (const t of tokens) {
@@ -1092,6 +1104,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                     snippet,
                     created: note.frontmatter?.created as string | undefined,
                     tags,
+                    score: matchRatio,
                   })
                 }
               }
@@ -1109,6 +1122,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
             ],
           }
         }
+
+        // Sort results by score (highest first) for better relevance
+        results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
 
         const lines: string[] = []
         if (range) {
