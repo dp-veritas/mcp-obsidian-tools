@@ -1049,8 +1049,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
         }[] = []
 
         // Collect all matches first, then sort by score and limit
-        // (Don't limit during collection - that causes high-scoring deep files to be missed)
-        const internalLimit = 1000 // Scan up to 1000 matches before sorting
+        // Scan ALL files (no internal limit) to ensure deeply nested high-scoring files aren't missed
+        const internalLimit = Infinity // No limit - scan entire vault
         for (const base of vaultDirectories) {
           const stack: string[] = [base]
           while (stack.length > 0 && results.length < internalLimit) {
@@ -1075,7 +1075,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                 }
 
                 const tags = extractAllTags(note)
+                const filenameLower = entry.name.toLowerCase()
+                // Include filename in haystack so filename matches count toward threshold
                 const haystack =
+                  filenameLower +
+                  "\n" +
                   note.content.toLowerCase() +
                   "\n" +
                   tags.join(" ").toLowerCase()
@@ -1087,6 +1091,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                   return regex.test(haystack)
                 }).length
                 const matchRatio = tokens.length > 0 ? matchCount / tokens.length : 1
+                
+                // Filename boost: if query terms appear in filename, boost score strongly
+                // This helps surface "Dissertation Final Project.md" for query "dissertation"
+                // Factor of 2.0 ensures filename matches outrank content-only matches
+                const filenameMatches = tokens.filter((t) => filenameLower.includes(t)).length
+                const filenameBoost = tokens.length > 0 ? (filenameMatches / tokens.length) * 2.0 : 0
 
                 // Require at least half the tokens to match (or all if only 1-2 tokens)
                 const minMatchRatio = tokens.length <= 2 ? 1 : 0.5
@@ -1111,7 +1121,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
                     snippet,
                     created: note.frontmatter?.created as string | undefined,
                     tags,
-                    score: matchRatio,
+                    score: matchRatio + filenameBoost, // Boost score if query terms in filename
                   })
                 }
               }
